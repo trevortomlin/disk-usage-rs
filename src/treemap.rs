@@ -88,7 +88,7 @@ fn lay_children(
     let mut items: Vec<(Option<NodeId>, f64)> = Vec::with_capacity(children.len().min(512));
     let mut rest_size = 0.0f64;
     let mut rest_count = 0u32;
-    for &c in children.iter() {
+    for c in children.iter() {
         let s = tree.node(c).size(mode) as f64;
         if s <= 0.0 {
             continue;
@@ -104,11 +104,7 @@ fn lay_children(
         let a = rest_size * scale;
         if rest_count == 1 && a >= 1.0 {
             // A single leftover is still worth showing as itself.
-            let last = children
-                .iter()
-                .rev()
-                .copied()
-                .find(|&c| tree.node(c).size(mode) > 0);
+            let last = children.iter().rev().find(|&c| tree.node(c).size(mode) > 0);
             items.push((last, a));
             rest_count = 0;
         } else if a >= 1.0 {
@@ -148,7 +144,9 @@ fn lay_children(
                 let mut inner = node;
                 loop {
                     let n = tree.node(inner);
-                    let mut live = n.children().filter(|&c| tree.node(c).size(mode) > 0);
+                    let mut live = n
+                        .children()
+                        .filter(|&c| !tree.node(c).is_deleted() && tree.node(c).size(mode) > 0);
                     match (live.next(), live.next()) {
                         (Some(only), None)
                             if tree.node(only).is_dir() && tree.node(only).child_count > 0 =>

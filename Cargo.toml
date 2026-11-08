@@ -3,7 +3,7 @@ name = "disk-usage"
 version = "0.1.0"
 edition = "2024"
 description = "A fast, beautiful disk usage analyzer built on GPUI Fast"
-license = "Apache-2.0"
+license = "MIT"
 
 [[bin]]
 name = "disk-usage"
@@ -15,6 +15,8 @@ gpui_platform = { git = "https://github.com/trevortomlin/gpui-fast", package = "
 rayon = "1.10"
 libc = "0.2"
 anyhow = "1"
+trash = "5"
+io-uring = "0.7"
 
 # Only for `--features snapshot`: offscreen rendering of the UI to PNG files.
 gpui_wgpu = { git = "https://github.com/trevortomlin/gpui-fast", package = "gpui_wgpu", optional = true }

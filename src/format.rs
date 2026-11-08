@@ -32,6 +32,15 @@ pub fn count(n: u64) -> String {
     out
 }
 
+/// "1 item", "2,048 items".
+pub fn items(n: u64) -> String {
+    if n == 1 {
+        "1 item".into()
+    } else {
+        format!("{} items", count(n))
+    }
+}
+
 pub fn percent(part: u64, whole: u64) -> String {
     if whole == 0 {
         return "—".into();

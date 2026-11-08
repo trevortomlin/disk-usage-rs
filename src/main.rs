@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod bench;
 mod format;
 mod mounts;
 mod scan;
@@ -25,7 +26,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", SelectPrev, ctx),
         KeyBinding::new("home", SelectFirst, ctx),
         KeyBinding::new("end", SelectLast, ctx),
-        KeyBinding::new("enter", OpenSelected, ctx),
+        KeyBinding::new("enter", Confirm, ctx),
         KeyBinding::new("right", OpenSelected, ctx),
         KeyBinding::new("l", OpenSelected, ctx),
         KeyBinding::new("backspace", GoUp, ctx),
@@ -42,41 +43,21 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", CopyPath, ctx),
         KeyBinding::new("ctrl-e", RevealSelected, ctx),
         KeyBinding::new("ctrl-n", StartOver, ctx),
+        KeyBinding::new("delete", TrashSelected, ctx),
+        KeyBinding::new("shift-delete", DeleteSelected, ctx),
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--bench") {
+        bench::run();
+        return;
+    }
     #[cfg(feature = "snapshot")]
     if std::env::args().nth(1).as_deref() == Some("--snapshot") {
         snapshot::run();
-        return;
-    }
-
-    // Headless scanner benchmark: `disk-usage --bench PATH`.
-    if std::env::args().nth(1).as_deref() == Some("--bench") {
-        let path = std::env::args_os()
-            .nth(2)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ".".into());
-        let progress = scan::Progress::default();
-        let tree = scan::scan(
-            &path,
-            scan::ScanOptions {
-                one_file_system: true,
-            },
-            &progress,
-        )
-        .expect("scan failed");
-        let root = tree.node(scan::ROOT);
-        println!(
-            "{} items, {} on disk, {} apparent, in {}",
-            format::count(root.items),
-            format::bytes(root.disk),
-            format::bytes(root.apparent),
-            format::duration(tree.elapsed)
-        );
         return;
     }
 

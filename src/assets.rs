@@ -29,6 +29,8 @@ const ICONS: &[(&str, &[u8])] = icons![
     "link",
     "refresh",
     "x",
+    "trash",
+    "alert",
 ];
 
 pub fn icon(name: &str) -> SharedString {

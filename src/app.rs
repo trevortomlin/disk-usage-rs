@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corners, ElementId,
-    Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, ElementId, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, MouseButton, MouseDownEvent,
     MouseMoveEvent, NavigationDirection, PathPromptOptions, Pixels, Point, Render, ScrollStrategy,
     SharedString, Task, TextAlign, TextRun, UniformListScrollHandle, Window, actions, anchored,
     canvas, deferred, div, fill, hsla, linear_color_stop, linear_gradient, point, prelude::*, px,
@@ -42,9 +42,18 @@ actions!(
         CopyPath,
         RevealSelected,
         StartOver,
+        TrashSelected,
+        DeleteSelected,
+        Confirm,
         Quit,
     ]
 );
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    Trash,
+    Delete,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
@@ -81,6 +90,9 @@ pub struct HoverCard {
     pos: Point<Pixels>,
     area: Bounds<Pixels>,
     info: Option<(SharedString, SharedString, SharedString, Hsla)>,
+    /// The hovered tile, in window coordinates. Drawn here rather than in the
+    /// treemap so moving the pointer never repaints the treemap.
+    outline: Option<Bounds<Pixels>>,
 }
 
 impl Render for HoverCard {
@@ -88,6 +100,18 @@ impl Render for HoverCard {
         let Some((name, size, detail, color)) = self.info.clone() else {
             return div().into_any_element();
         };
+        let outline = self.outline.map(|b| {
+            div()
+                .absolute()
+                .left(b.origin.x - self.area.origin.x)
+                .top(b.origin.y - self.area.origin.y)
+                .w(b.size.width)
+                .h(b.size.height)
+                .rounded(px(3.0))
+                .bg(hsla(0.0, 0.0, 1.0, 0.10))
+                .border(px(1.5))
+                .border_color(hsla(0.0, 0.0, 1.0, 0.9))
+        });
         let w = px(240.0);
         let h = px(58.0);
         let mut x = self.pos.x - self.area.origin.x + px(16.0);
@@ -98,7 +122,7 @@ impl Render for HoverCard {
         if y + h > self.area.size.height {
             y = (self.pos.y - self.area.origin.y - h - px(12.0)).max(px(4.0));
         }
-        div()
+        let card = div()
             .absolute()
             .left(x)
             .top(y)
@@ -135,7 +159,12 @@ impl Render for HoverCard {
                     .text_xs()
                     .child(div().text_color(theme::text()).child(size))
                     .child(div().text_color(theme::muted()).truncate().child(detail)),
-            )
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .children(outline)
+            .child(card)
             .into_any_element()
     }
 }
@@ -152,7 +181,7 @@ pub struct DiskUsage {
     back: Vec<NodeId>,
     forward: Vec<NodeId>,
     selected: Option<NodeId>,
-    hovered_tile: Option<NodeId>,
+    hovered_branch: Option<NodeId>,
     hovered_row: Option<NodeId>,
     mode: SizeMode,
     sort: SortKey,
@@ -163,6 +192,12 @@ pub struct DiskUsage {
     menu: Option<(Point<Pixels>, NodeId)>,
     one_fs: bool,
     capacity: Option<(u64, u64)>,
+    /// A removal waiting for the user's confirmation.
+    confirm: Option<(Removal, NodeId)>,
+    /// Items being trashed or deleted right now.
+    removing: Vec<NodeId>,
+    toast: Option<(SharedString, bool)>,
+    toast_task: Option<Task<()>>,
 }
 
 impl Focusable for DiskUsage {
@@ -179,6 +214,7 @@ impl DiskUsage {
             pos: Point::default(),
             area: Bounds::default(),
             info: None,
+            outline: None,
         });
         let mut this = Self {
             focus,
@@ -192,7 +228,7 @@ impl DiskUsage {
             back: Vec::new(),
             forward: Vec::new(),
             selected: None,
-            hovered_tile: None,
+            hovered_branch: None,
             hovered_row: None,
             mode: SizeMode::Disk,
             sort: SortKey::Size,
@@ -203,6 +239,10 @@ impl DiskUsage {
             menu: None,
             one_fs: true,
             capacity: None,
+            confirm: None,
+            removing: Vec::new(),
+            toast: None,
+            toast_task: None,
         };
         if let Some(path) = initial {
             this.start_scan(path, cx);
@@ -284,7 +324,7 @@ impl DiskUsage {
                 self.forward.clear();
                 self.current = previous.and_then(|p| self.find_path(&p)).unwrap_or(ROOT);
                 self.selected = None;
-                self.hovered_tile = None;
+                self.hovered_branch = None;
                 self.hovered_row = None;
                 self.rebuild_rows();
             }
@@ -310,11 +350,7 @@ impl DiskUsage {
         let rel = path.strip_prefix(&tree.root_path).ok()?;
         let mut cur = ROOT;
         for part in rel.components() {
-            let name = part.as_os_str().to_string_lossy();
-            cur = tree
-                .node(cur)
-                .children()
-                .find(|&c| *tree.node(c).name == *name)?;
+            cur = tree.find_child(cur, part.as_os_str().as_encoded_bytes())?;
         }
         Some(cur)
     }
@@ -347,15 +383,15 @@ impl DiskUsage {
         let mut rows: Vec<Row> = by_size
             .iter()
             .enumerate()
-            .map(|(i, &node)| Row {
+            .map(|(i, node)| Row {
                 node,
                 color: i as u32,
             })
             .collect();
         match self.sort {
             SortKey::Size => {}
-            SortKey::Name => rows.sort_by_cached_key(|r| tree.node(r.node).name.to_lowercase()),
-            SortKey::Items => rows.sort_by_key(|r| std::cmp::Reverse(tree.node(r.node).items)),
+            SortKey::Name => rows.sort_by_cached_key(|r| tree.name(r.node).to_lowercase()),
+            SortKey::Items => rows.sort_by_key(|r| std::cmp::Reverse(tree.node(r.node).items())),
         }
         self.rows = rows.into();
     }
@@ -379,7 +415,7 @@ impl DiskUsage {
         self.current = node;
         self.selected = select;
         self.hovered_row = None;
-        self.hovered_tile = None;
+        self.hovered_branch = None;
         self.menu = None;
         self.rebuild_rows();
         let ix = select.and_then(|s| self.rows.iter().position(|r| r.node == s));
@@ -387,6 +423,7 @@ impl DiskUsage {
             .scroll_to_item(ix.unwrap_or(0), ScrollStrategy::Center);
         self.hover_card.update(cx, |c, cx| {
             c.info = None;
+            c.outline = None;
             cx.notify();
         });
         cx.notify();
@@ -460,7 +497,7 @@ impl DiskUsage {
         let (Some(sel), Some(tree)) = (self.selected, &self.tree) else {
             return;
         };
-        if tree.node(sel).is_dir() && tree.node(sel).child_count > 0 {
+        if tree.node(sel).is_openable() {
             self.navigate(sel, cx);
         }
     }
@@ -507,7 +544,7 @@ impl DiskUsage {
     }
 
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() {
+        if self.confirm.take().is_some() || self.menu.take().is_some() {
             cx.notify();
         } else if self.scanning.is_some() {
             self.cancel_scan(cx);
@@ -576,6 +613,25 @@ impl DiskUsage {
     }
 
     #[cfg(feature = "snapshot")]
+    pub fn debug_confirm(&mut self, permanent: bool, cx: &mut Context<Self>) {
+        if let Some(node) = self.selected {
+            let kind = if permanent {
+                Removal::Delete
+            } else {
+                Removal::Trash
+            };
+            self.request_removal(kind, node, cx);
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub fn debug_accept(&mut self, cx: &mut Context<Self>) {
+        if let Some((kind, node)) = self.confirm.take() {
+            self.remove(kind, node, cx);
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
     pub fn debug_zoom(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(r) = self.rows.get(ix) {
             let node = r.node;
@@ -593,6 +649,128 @@ impl DiskUsage {
         self.on_map_move(&e, window, cx);
     }
 
+    // ── Trash and delete ────────────────────────────────────────────────
+
+    fn trash_selected(&mut self, _: &TrashSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(node) = self.selected {
+            self.request_removal(Removal::Trash, node, cx);
+        }
+    }
+
+    fn delete_selected(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(node) = self.selected {
+            self.request_removal(Removal::Delete, node, cx);
+        }
+    }
+
+    fn confirm_action(&mut self, _: &Confirm, w: &mut Window, cx: &mut Context<Self>) {
+        if let Some((kind, node)) = self.confirm.take() {
+            self.remove(kind, node, cx);
+        } else {
+            self.open_selected(&OpenSelected, w, cx);
+        }
+    }
+
+    /// Both kinds of removal ask first; the dialog says which one it is.
+    fn request_removal(&mut self, kind: Removal, node: NodeId, cx: &mut Context<Self>) {
+        if self.tree.is_none() || node == ROOT || self.removing.contains(&node) {
+            return;
+        }
+        self.menu = None;
+        self.confirm = Some((kind, node));
+        cx.notify();
+    }
+
+    fn remove(&mut self, kind: Removal, node: NodeId, cx: &mut Context<Self>) {
+        let Some(tree) = self.tree.clone() else {
+            return;
+        };
+        if node == ROOT || tree.node(node).is_deleted() {
+            return;
+        }
+        let path = tree.path_of(node);
+        let name = tree.name(node).into_owned();
+        let size = tree.node(node).size(self.mode);
+        self.removing.push(node);
+        cx.notify();
+        let job = cx.background_executor().spawn(async move {
+            match kind {
+                Removal::Trash => trash::delete(&path).map_err(|e| anyhow::anyhow!("{e}")),
+                Removal::Delete => {
+                    let meta = std::fs::symlink_metadata(&path)?;
+                    if meta.is_dir() {
+                        std::fs::remove_dir_all(&path)?;
+                    } else {
+                        std::fs::remove_file(&path)?;
+                    }
+                    Ok(())
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            this.update(cx, |this, cx| {
+                this.removing.retain(|&n| n != node);
+                match result {
+                    Ok(()) => {
+                        tree.mark_deleted(node);
+                        this.after_removal(node, cx);
+                        let verb = match kind {
+                            Removal::Trash => "Moved to Trash",
+                            Removal::Delete => "Deleted",
+                        };
+                        this.show_toast(
+                            format!("{verb}: {name} ({})", format::bytes(size)),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        // A partial delete may have removed some files; a rescan shows the truth.
+                        this.show_toast(format!("Couldn't remove {name}: {err:#}"), true, cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn after_removal(&mut self, node: NodeId, cx: &mut Context<Self>) {
+        let Some(tree) = self.tree.clone() else {
+            return;
+        };
+        // If we were inside what got removed, step out to its parent.
+        if tree.is_ancestor(node, self.current) {
+            self.current = tree.node(node).parent;
+            self.back.clear();
+            self.forward.clear();
+        }
+        if self.selected.is_some_and(|s| tree.is_ancestor(node, s)) {
+            self.selected = None;
+        }
+        self.hovered_branch = None;
+        self.hovered_row = None;
+        self.generation += 1;
+        self.capacity = mounts::capacity(&tree.root_path);
+        self.rebuild_rows();
+        cx.notify();
+    }
+
+    fn show_toast(&mut self, text: String, error: bool, cx: &mut Context<Self>) {
+        self.toast = Some((text.into(), error));
+        self.toast_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            this.update(cx, |this, cx| {
+                this.toast = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     // ── Treemap interaction ─────────────────────────────────────────────
 
     fn hit_test(&self, pos: Point<Pixels>) -> Option<Tile> {
@@ -608,22 +786,53 @@ impl DiskUsage {
 
     fn on_map_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let hit = self.hit_test(e.position);
-        let node = hit.map(|t| t.node);
-        if node != self.hovered_tile {
-            self.hovered_tile = node;
+        // Only the top-level item under the pointer matters to this view (its
+        // list row lights up), so re-render only when that changes.
+        let branch = match (hit, &self.tree) {
+            (Some(t), Some(tree)) => self.branch_of(tree, t.node),
+            _ => None,
+        };
+        if branch != self.hovered_branch {
+            self.hovered_branch = branch;
             cx.notify();
         }
         let info = match (hit, &self.tree) {
             (Some(t), Some(tree)) => Some(self.describe_tile(tree, &t)),
             _ => None,
         };
-        let area = self.map.borrow().bounds;
+        let map = self.map.borrow();
+        let area = map.bounds;
+        let outline = hit.map(|t| {
+            Bounds::new(
+                point(area.origin.x + px(t.rect.x), area.origin.y + px(t.rect.y)),
+                size(px((t.rect.w - 1.0).max(1.0)), px((t.rect.h - 1.0).max(1.0))),
+            )
+        });
+        drop(map);
         self.hover_card.update(cx, |card, cx| {
             card.pos = e.position;
             card.area = area;
             card.info = info;
+            card.outline = outline;
             cx.notify();
         });
+    }
+
+    /// The child of the current folder that contains `node`.
+    fn branch_of(&self, tree: &Tree, mut node: NodeId) -> Option<NodeId> {
+        if node == self.current {
+            return None;
+        }
+        loop {
+            let parent = tree.node(node).parent;
+            if parent == self.current {
+                return Some(node);
+            }
+            if node == ROOT {
+                return None;
+            }
+            node = parent;
+        }
     }
 
     fn describe_tile(
@@ -638,22 +847,22 @@ impl DiskUsage {
             return (
                 format!("{} smaller items", format::count(count as u64)).into(),
                 "".into(),
-                format!("in {}", n.name).into(),
+                format!("in {}", tree.name(t.node)).into(),
                 color,
             );
         }
         let size = n.size(self.mode);
         let detail = if n.is_dir() {
             format!(
-                "{} · {} items",
+                "{} · {}",
                 format::percent(size, current),
-                format::count(n.items)
+                format::items(n.items())
             )
         } else {
             format!("{} of view", format::percent(size, current))
         };
         (
-            n.name.to_string().into(),
+            tree.name(t.node).into_owned().into(),
             format::bytes(size).into(),
             detail.into(),
             color,
@@ -661,10 +870,11 @@ impl DiskUsage {
     }
 
     fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        if self.hovered_tile.take().is_some() {
+        if self.hovered_branch.take().is_some() {
             cx.notify();
         }
         self.hover_card.update(cx, |c, cx| {
+            c.outline = None;
             if c.info.take().is_some() {
                 cx.notify();
             }
@@ -1359,7 +1569,7 @@ impl DiskUsage {
             let label: SharedString = if id == ROOT {
                 tree.root_path.to_string_lossy().into_owned().into()
             } else {
-                tree.node(id).name.to_string().into()
+                tree.name(id).into_owned().into()
             };
             if i > 0 {
                 crumbs = crumbs.child(icon_el("chevron-right", theme::faint(), 12.0));
@@ -1411,7 +1621,7 @@ impl DiskUsage {
                 .unwrap_or_else(|| tree.root_path.to_string_lossy().into_owned())
                 .into()
         } else {
-            cur.name.to_string().into()
+            tree.name(self.current).into_owned().into()
         };
 
         // A stacked bar of the biggest children, colored like the treemap.
@@ -1423,7 +1633,7 @@ impl DiskUsage {
             .flex()
             .bg(theme::border());
         if total > 0 {
-            for (i, &c) in tree
+            for (i, c) in tree
                 .sorted_children(self.current, self.mode)
                 .iter()
                 .take(12)
@@ -1507,8 +1717,8 @@ impl DiskUsage {
                                     )
                                     .child(div().text_xs().text_color(theme::muted()).child(
                                         format!(
-                                            "{} items{}",
-                                            format::count(cur.items),
+                                            "{}{}",
+                                            format::items(cur.items()),
                                             if self.current != ROOT {
                                                 format!(
                                                     " · {} of scan",
@@ -1567,7 +1777,7 @@ impl DiskUsage {
                     .justify_center()
                     .text_sm()
                     .text_color(theme::faint())
-                    .child(if cur.error {
+                    .child(if cur.has_error() {
                         "Couldn't read this folder"
                     } else {
                         "Empty folder"
@@ -1587,6 +1797,7 @@ impl DiskUsage {
                 .flex_1()
                 .into_any_element()
             })
+            .children(self.render_selection_bar(cx))
     }
 
     fn render_row(&self, ix: usize, row: Row, cx: &mut Context<Self>) -> AnyElement {
@@ -1600,20 +1811,16 @@ impl DiskUsage {
             0.0
         };
         let selected = self.selected == Some(row.node);
-        let linked = self
-            .hovered_tile
-            .is_some_and(|h| tree.is_ancestor(row.node, h));
+        let linked = self.hovered_branch == Some(row.node);
         let color = theme::branch(row.color);
         let node = row.node;
         let (icon_name, icon_color) = match n.kind {
             Kind::Dir => ("folder", color),
             Kind::Symlink => ("link", theme::muted()),
-            Kind::Other if n.disk == 0 && n.child_count == 0 && n.items == 0 => {
-                ("drive", theme::muted())
-            }
+            Kind::Other if n.is_mount() => ("drive", theme::muted()),
             _ => ("file", theme::muted()),
         };
-        let openable = n.is_dir() && n.child_count > 0;
+        let openable = n.is_openable();
 
         div()
             .id(("row", ix))
@@ -1664,7 +1871,7 @@ impl DiskUsage {
                     } else {
                         gpui::rgb(0xc4cad6).into()
                     })
-                    .child(SharedString::from(n.name.to_string())),
+                    .child(SharedString::from(tree.name(row.node).into_owned())),
             )
             .child(
                 div()
@@ -1674,7 +1881,7 @@ impl DiskUsage {
                     .text_right()
                     .text_color(theme::faint())
                     .child(if n.is_dir() {
-                        format::count(n.items)
+                        format::count(n.items())
                     } else {
                         String::new()
                     }),
@@ -1714,7 +1921,6 @@ impl DiskUsage {
         let current = self.current;
         let mode = self.mode;
         let generation = self.generation;
-        let hovered = self.hovered_tile;
         let focus = self.hovered_row.or(self.selected);
 
         let map = canvas(
@@ -1743,7 +1949,7 @@ impl DiskUsage {
             },
             move |bounds, (cache, tree), window, cx| {
                 let c = cache.borrow();
-                paint_treemap(&c.tiles, &tree, bounds, hovered, focus, mode, window, cx);
+                paint_treemap(&c.tiles, &tree, bounds, focus, mode, window, cx);
             },
         )
         .size_full();
@@ -1792,7 +1998,7 @@ impl DiskUsage {
             .overflow_hidden()
             .text_xs()
             .text_color(theme::muted());
-        for (i, &c) in tree
+        for (i, c) in tree
             .sorted_children(self.current, self.mode)
             .iter()
             .take(8)
@@ -1814,7 +2020,7 @@ impl DiskUsage {
                             .rounded(px(2.0))
                             .bg(theme::branch(i as u32)),
                     )
-                    .child(SharedString::from(n.name.to_string())),
+                    .child(SharedString::from(tree.name(c).into_owned())),
             );
         }
         row.child(div().flex_1()).child(
@@ -1845,8 +2051,8 @@ impl DiskUsage {
             bar = bar
                 .child(format!(
                     "{} files · {} folders · {} total",
-                    format::count(root.items + 1 - dirs as u64),
-                    format::count(dirs as u64),
+                    format::count(root.items() + 1 - dirs),
+                    format::count(dirs),
                     format::bytes(root.size(self.mode))
                 ))
                 .child(format!("scanned in {}", format::duration(tree.elapsed)));
@@ -1876,11 +2082,326 @@ impl DiskUsage {
         bar
     }
 
+    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (kind, node) = self.confirm?;
+        let tree = self.tree.as_ref()?;
+        let n = tree.node(node);
+        let name: SharedString = tree.name(node).into_owned().into();
+        let path: SharedString = tree.path_of(node).to_string_lossy().into_owned().into();
+        let what = if n.is_dir() {
+            format!(
+                "{} · {}",
+                format::bytes(n.size(self.mode)),
+                format::items(n.items())
+            )
+        } else {
+            format::bytes(n.size(self.mode))
+        };
+        let (title, body, action, icon_name, danger) = match kind {
+            Removal::Trash => (
+                "Move to Trash?",
+                "You can restore it from the Trash later.",
+                "Move to Trash",
+                "trash",
+                false,
+            ),
+            Removal::Delete => (
+                "Delete permanently?",
+                "This can't be undone. The files are removed from disk right away.",
+                "Delete permanently",
+                "alert",
+                true,
+            ),
+        };
+        let accent = if danger {
+            theme::danger()
+        } else {
+            theme::accent()
+        };
+
+        Some(deferred(
+            div()
+                .id("confirm-backdrop")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.confirm = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("confirm")
+                        .w(px(440.0))
+                        .p_5()
+                        .rounded_xl()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(theme::border_strong())
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        // Clicks inside the dialog shouldn't close it.
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .size(px(36.0))
+                                        .flex_none()
+                                        .rounded_lg()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(accent.opacity(0.15))
+                                        .child(icon_el(icon_name, accent, 18.0)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div().text_sm().text_color(theme::muted()).child(body),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(theme::bg())
+                                .border_1()
+                                .border_color(theme::border())
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(name),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_sm()
+                                                .text_color(theme::muted())
+                                                .child(what),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::faint())
+                                        .text_ellipsis_middle()
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .child(path),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(button("confirm-cancel", "Cancel", None, false).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.confirm = None;
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(
+                                    button("confirm-ok", action, Some(icon_name), true)
+                                        .when(danger, |b| {
+                                            b.bg(theme::danger()).border_color(theme::danger())
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.confirm = None;
+                                            this.remove(kind, node, cx);
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::faint())
+                                .child("Enter to confirm · Esc to cancel"),
+                        ),
+                ),
+        ))
+    }
+
+    fn render_toast(&self) -> Option<impl IntoElement> {
+        let (text, error) = self.toast.clone()?;
+        let color = if error {
+            theme::danger()
+        } else {
+            theme::accent()
+        };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(40.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .max_w(px(640.0))
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(theme::raised())
+                        .border_1()
+                        .border_color(color.opacity(0.5))
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(icon_el(if error { "alert" } else { "trash" }, color, 14.0))
+                        .child(div().min_w_0().truncate().child(text)),
+                ),
+        )
+    }
+
+    /// Bar under the list with actions for the selected item.
+    fn render_selection_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let node = self.selected?;
+        let tree = self.tree.as_ref()?;
+        let n = tree.node(node);
+        if n.is_deleted() || node == ROOT {
+            return None;
+        }
+        let busy = self.removing.contains(&node);
+        let small =
+            |id: &'static str, icon_name: &'static str, label: &'static str, danger: bool| {
+                div()
+                    .id(id)
+                    .h(px(26.0))
+                    .px_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1p5()
+                    .rounded_md()
+                    .text_xs()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::raised())
+                    .cursor_pointer()
+                    .text_color(if danger {
+                        theme::danger()
+                    } else {
+                        theme::text()
+                    })
+                    .hover(move |s| {
+                        if danger {
+                            s.bg(theme::danger().opacity(0.15))
+                                .border_color(theme::danger())
+                        } else {
+                            s.bg(theme::border()).border_color(theme::border_strong())
+                        }
+                    })
+                    .child(icon_el(
+                        icon_name,
+                        if danger {
+                            theme::danger()
+                        } else {
+                            theme::muted()
+                        },
+                        13.0,
+                    ))
+                    .child(label)
+            };
+        Some(
+            div()
+                .flex_none()
+                .h(px(44.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_t_1()
+                .border_color(theme::border())
+                .bg(theme::raised())
+                .child(icon_el(
+                    if n.is_dir() { "folder" } else { "file" },
+                    theme::muted(),
+                    14.0,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_sm()
+                                .truncate()
+                                .child(SharedString::from(tree.name(node).into_owned())),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme::faint())
+                                .child(format::bytes(n.size(self.mode))),
+                        ),
+                )
+                .when(busy, |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child("Removing…"),
+                    )
+                })
+                .when(!busy, |d| {
+                    d.child(
+                        small("sel-trash", "trash", "Move to Trash", false).on_click(cx.listener(
+                            move |this, _, _, cx| this.request_removal(Removal::Trash, node, cx),
+                        )),
+                    )
+                    .child(
+                        small("sel-delete", "alert", "Delete", true).on_click(cx.listener(
+                            move |this, _, _, cx| this.request_removal(Removal::Delete, node, cx),
+                        )),
+                    )
+                }),
+        )
+    }
+
     fn render_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (pos, node) = self.menu?;
         let tree = self.tree.as_ref()?;
         let n = tree.node(node);
-        let is_dir = n.is_dir() && n.child_count > 0;
+        let is_dir = n.is_openable();
 
         let item = |id: &'static str, icon_name: &'static str, label: &'static str| {
             div()
@@ -1924,7 +2445,7 @@ impl DiskUsage {
                             .text_xs()
                             .text_color(theme::faint())
                             .truncate()
-                            .child(SharedString::from(n.name.to_string())),
+                            .child(SharedString::from(tree.name(node).into_owned())),
                     )
                     .when(is_dir, |d| {
                         d.child(item("m-zoom", "layers", "Zoom in").on_click(cx.listener(
@@ -1954,7 +2475,24 @@ impl DiskUsage {
                             this.copy_node_path(node, cx);
                             cx.notify();
                         },
-                    ))),
+                    )))
+                    .when(node != ROOT, |d| {
+                        d.child(div().h(px(1.0)).my_1().bg(theme::border()))
+                            .child(
+                                item("m-trash", "trash", "Move to Trash").on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.request_removal(Removal::Trash, node, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                item("m-delete", "alert", "Delete permanently…")
+                                    .text_color(theme::danger())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_removal(Removal::Delete, node, cx)
+                                    })),
+                            )
+                    }),
             ),
         ))
     }
@@ -1989,6 +2527,9 @@ impl Render for DiskUsage {
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::reveal_selected))
             .on_action(cx.listener(Self::start_over))
+            .on_action(cx.listener(Self::trash_selected))
+            .on_action(cx.listener(Self::delete_selected))
+            .on_action(cx.listener(Self::confirm_action))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx)),
@@ -2002,6 +2543,7 @@ impl Render for DiskUsage {
                     this.start_scan(p.clone(), cx);
                 }
             }))
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -2015,6 +2557,8 @@ impl Render for DiskUsage {
                 d.child(self.render_status())
             })
             .children(self.render_menu(cx))
+            .children(self.render_confirm(cx))
+            .children(self.render_toast())
     }
 }
 
@@ -2025,7 +2569,6 @@ fn paint_treemap(
     tiles: &[Tile],
     tree: &Tree,
     bounds: Bounds<Pixels>,
-    hovered: Option<NodeId>,
     focus: Option<NodeId>,
     mode: SizeMode,
     window: &mut Window,
@@ -2129,7 +2672,17 @@ fn paint_treemap(
                         h: 14.0,
                     };
                     paint_label(
-                        origin, &n.name, None, area, &font, &font, label_size, txt, txt, window, cx,
+                        origin,
+                        &tree.name(t.node),
+                        None,
+                        area,
+                        &font,
+                        &font,
+                        label_size,
+                        txt,
+                        txt,
+                        window,
+                        cx,
                     );
                     if r.h >= 34.0 {
                         let sz = format::bytes(n.size(mode));
@@ -2215,38 +2768,20 @@ fn paint_treemap(
             Default::default(),
         ));
     }
-
-    if let Some(h) = hovered
-        && let Some(t) = tiles.iter().rev().find(|t| t.node == h)
-    {
-        let hb = to_bounds(Rect {
-            w: t.rect.w - 1.0,
-            h: t.rect.h - 1.0,
-            ..t.rect
-        });
-        window.paint_quad(quad(
-            hb,
-            Corners::all(px(3.0)),
-            hsla(0.0, 0.0, 1.0, 0.10),
-            px(1.5),
-            hsla(0.0, 0.0, 1.0, 0.9),
-            Default::default(),
-        ));
-    }
 }
 
 /// "a / b / c" for a folded chain of single-folder directories.
 fn chain_label(tree: &Tree, top: NodeId, inner: NodeId) -> String {
     if top == inner {
-        return tree.node(top).name.to_string();
+        return tree.name(top).into_owned();
     }
     let mut parts = Vec::new();
     let mut cur = inner;
     while cur != top {
-        parts.push(&*tree.node(cur).name);
+        parts.push(tree.name(cur));
         cur = tree.node(cur).parent;
     }
-    parts.push(&*tree.node(top).name);
+    parts.push(tree.name(top));
     parts.reverse();
     parts.join(" / ")
 }
