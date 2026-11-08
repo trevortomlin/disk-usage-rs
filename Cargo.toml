@@ -1,0 +1,33 @@
+[package]
+name = "disk-usage"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, beautiful disk usage analyzer built on GPUI Fast"
+license = "Apache-2.0"
+
+[[bin]]
+name = "disk-usage"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/trevortomlin/gpui-fast", package = "gpui" }
+gpui_platform = { git = "https://github.com/trevortomlin/gpui-fast", package = "gpui_platform", features = ["wayland", "x11"] }
+rayon = "1.10"
+libc = "0.2"
+anyhow = "1"
+
+# Only for `--features snapshot`: offscreen rendering of the UI to PNG files.
+gpui_wgpu = { git = "https://github.com/trevortomlin/gpui-fast", package = "gpui_wgpu", optional = true }
+image = { version = "0.25.1", default-features = false, features = ["png"], optional = true }
+
+[features]
+snapshot = ["gpui/test-support", "gpui_platform/test-support", "dep:gpui_wgpu", "dep:image"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 2
