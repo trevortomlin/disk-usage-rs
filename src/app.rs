@@ -1141,7 +1141,7 @@ impl DiskUsage {
                                             .text_2xl()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(theme::text())
-                                            .child("Disk Usage"),
+                                            .child("Quarry"),
                                     )
                                     .child(
                                         div().text_sm().text_color(theme::muted()).child(

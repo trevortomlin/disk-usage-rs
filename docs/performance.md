@@ -10,7 +10,7 @@ Everything below was measured on one machine: an Intel i7-6700K (4 cores, 8 thre
 | NVMe SSD | Samsung 970 EVO 1 TB | ext4 | the whole drive: 519 k items, 59 k folders |
 
 "Before" is the first commit (`ae51f71`). "After" is this version. Both were measured with
-the same harness, `disk-usage --bench PATH`. For cold runs the kernel caches were dropped
+the same harness, `quarry --bench PATH`. For cold runs the kernel caches were dropped
 before every run (`echo 3 > /proc/sys/vm/drop_caches`), and each run's device reads were
 counted from `/proc/diskstats` to confirm it really came from disk. With dropped caches,
 repeated cold runs agree within about 1%. Without dropping them, the same binary varied
@@ -146,8 +146,8 @@ One more knob, not tested here because it changes the system: the drive uses BFQ
 
 ```sh
 cargo build --release
-./target/release/disk-usage --bench /path            # one line of metrics
-DU_TRACE=1 ./target/release/disk-usage --bench /path # plus phase timings
+./target/release/quarry --bench /path            # one line of metrics
+DU_TRACE=1 ./target/release/quarry --bench /path # plus phase timings
 
 # For cold runs (as root):
 sync; echo 3 > /proc/sys/vm/drop_caches

@@ -1,9 +1,20 @@
-# Disk Usage
+<p align="center">
+  <img src="assets/app/quarry.svg" width="96" alt="Quarry icon">
+</p>
 
-A fast disk usage analyzer for Linux, written in Rust on
-[GPUI Fast](https://github.com/trevortomlin/gpui-fast).
+<h1 align="center">Quarry</h1>
 
-![Disk Usage showing /usr](docs/screenshot.png)
+<p align="center">
+  A fast disk usage analyzer for Linux with a zoomable treemap.<br>
+  Written in Rust on <a href="https://github.com/trevortomlin/gpui-fast">GPUI Fast</a>.
+</p>
+
+Quarry digs through a drive and shows you what is taking up the space. It's part of a family
+of fast Linux apps that share one look: [Rowscope](https://github.com/trevortomlin/rowscope)
+(spreadsheets), [Tidewatch](https://github.com/trevortomlin/tidewatch) (task manager)
+and Warren (file manager).
+
+![Quarry showing /usr](docs/screenshot.png)
 
 <img src="docs/delete-dialog.png" alt="Confirming a permanent delete" width="640">
 
@@ -57,12 +68,20 @@ by reading the raw device (which would need root).
 
 ```sh
 cargo build --release
-./target/release/disk-usage            # start screen
-./target/release/disk-usage ~/Projects  # scan right away
+./target/release/quarry              # start screen
+./target/release/quarry ~/Projects   # scan right away
 ```
 
 Requires a recent stable Rust toolchain and the usual GPUI Linux dependencies
 (Vulkan or OpenGL, Wayland and/or X11, fontconfig, xkbcommon).
+
+To add it to your application menu:
+
+```sh
+install -Dm755 target/release/quarry ~/.local/bin/quarry
+install -Dm644 quarry.desktop ~/.local/share/applications/quarry.desktop
+install -Dm644 assets/app/quarry.svg ~/.local/share/icons/hicolor/scalable/apps/quarry.svg
+```
 
 ## Keyboard
 

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Quarry
+GenericName=Disk Usage Analyzer
+Comment=See what is taking up space on your disks
+Exec=quarry %f
+Icon=quarry
+Terminal=false
+Categories=System;Filesystem;Utility;
+MimeType=inode/directory;
+Keywords=disk;usage;space;treemap;storage;
+StartupWMClass=quarry

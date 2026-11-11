@@ -75,10 +75,10 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Disk Usage".into()),
+                        title: Some("Quarry".into()),
                         ..Default::default()
                     }),
-                    app_id: Some("disk-usage".into()),
+                    app_id: Some("quarry".into()),
                     window_min_size: Some(size(px(760.0), px(480.0))),
                     ..Default::default()
                 },

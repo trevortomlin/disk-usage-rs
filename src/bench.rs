@@ -1,4 +1,4 @@
-//! Headless benchmark: `disk-usage --bench PATH [--no-layout]`.
+//! Headless benchmark: `quarry --bench PATH [--no-layout]`.
 //!
 //! Scans PATH once in this process and prints one line of `key=value` metrics:
 //! wall time, CPU time, peak and retained RSS, and treemap layout time.

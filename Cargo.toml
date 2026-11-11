@@ -1,12 +1,12 @@
 [package]
-name = "disk-usage"
+name = "quarry"
 version = "0.1.0"
 edition = "2024"
-description = "A fast, beautiful disk usage analyzer built on GPUI Fast"
+description = "Quarry: a fast disk usage analyzer with a treemap, built on GPUI Fast"
 license = "MIT"
 
 [[bin]]
-name = "disk-usage"
+name = "quarry"
 path = "src/main.rs"
 
 [dependencies]

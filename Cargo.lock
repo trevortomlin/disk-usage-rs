@@ -1346,21 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "disk-usage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gpui",
- "gpui_platform",
- "gpui_wgpu",
- "image",
- "io-uring",
- "libc",
- "rayon",
- "trash",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4289,6 +4274,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "quarry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui_platform",
+ "gpui_wgpu",
+ "image",
+ "io-uring",
+ "libc",
+ "rayon",
+ "trash",
 ]
 
 [[package]]
